@@ -72,7 +72,7 @@
 
 namespace moodycamel {
 
-template<typename T, size_t MAX_BLOCK_SIZE = 512>
+template<typename T, typename Allocator = std::allocator<char>, size_t MAX_BLOCK_SIZE = 512>
 class MOODYCAMEL_MAYBE_ALIGN_TO_CACHELINE ReaderWriterQueue
 {
 	// Design: Based on a queue-of-queues. The low-level queues are just
@@ -102,11 +102,28 @@ public:
 	// allocations. If more than MAX_BLOCK_SIZE elements are requested,
 	// then several blocks of MAX_BLOCK_SIZE each are reserved (including
 	// at least one extra buffer block).
+	template<typename Source>
+	AE_NO_TSAN explicit ReaderWriterQueue(Source* const resource = nullptr, size_t size = 15)
+		:
+		allocator(resource)
+#ifndef NDEBUG
+		, enqueuing(false)
+		,dequeuing(false)
+#endif
+	{
+		Init(size);
+	}
+
 	AE_NO_TSAN explicit ReaderWriterQueue(size_t size = 15)
 #ifndef NDEBUG
 		: enqueuing(false)
 		,dequeuing(false)
 #endif
+	{
+		Init(size);
+	}
+
+	void Init(size_t size)
 	{
 		assert(MAX_BLOCK_SIZE == ceilToPow2(MAX_BLOCK_SIZE) && "MAX_BLOCK_SIZE must be a power of 2");
 		assert(MAX_BLOCK_SIZE >= 2 && "MAX_BLOCK_SIZE must be at least 2");
@@ -124,7 +141,7 @@ public:
 			largestBlockSize = MAX_BLOCK_SIZE;
 			Block* lastBlock = nullptr;
 			for (size_t i = 0; i != initialBlockCount; ++i) {
-				auto block = make_block(largestBlockSize);
+				auto block = make_block(allocator, largestBlockSize);
 				if (block == nullptr) {
 #ifdef MOODYCAMEL_EXCEPTIONS_ENABLED
 					throw std::bad_alloc();
@@ -143,7 +160,7 @@ public:
 			}
 		}
 		else {
-			firstBlock = make_block(largestBlockSize);
+			firstBlock = make_block(allocator, largestBlockSize);
 			if (firstBlock == nullptr) {
 #ifdef MOODYCAMEL_EXCEPTIONS_ENABLED
 				throw std::bad_alloc();
@@ -222,7 +239,7 @@ public:
 			
 			auto rawBlock = block->rawThis;
 			block->~Block();
-			std::free(rawBlock);
+			free_block(allocator, rawBlock);
 			block = nextBlock;
 		} while (block != frontBlock_);
 	}
@@ -603,7 +620,7 @@ private:
 			else if (canAlloc == CanAlloc) {
 				// tailBlock is full and there's no free block ahead; create a new block
 				auto newBlockSize = largestBlockSize >= MAX_BLOCK_SIZE ? largestBlockSize : largestBlockSize * 2;
-				auto newBlock = make_block(newBlockSize);
+				auto newBlock = make_block(allocator, newBlockSize);
 				if (newBlock == nullptr) {
 					// Could not allocate a block!
 					return false;
@@ -725,12 +742,19 @@ private:
 	};
 	
 	
-	static Block* make_block(size_t capacity) AE_NO_TSAN
+	static void free_block(Allocator& allocator, char* block)
 	{
+		typename Allocator::template rebind<char>::other a(allocator);
+		a.deallocate(block, 0);
+	}
+
+	static Block* make_block(Allocator& allocator, size_t capacity) AE_NO_TSAN
+	{
+		typename Allocator::template rebind<char>::other a(allocator);
 		// Allocate enough memory for the block itself, as well as all the elements it will contain
 		auto size = sizeof(Block) + std::alignment_of<Block>::value - 1;
 		size += sizeof(T) * capacity + std::alignment_of<T>::value - 1;
-		auto newBlockRaw = static_cast<char*>(std::malloc(size));
+		auto newBlockRaw = a.allocate(size);
 		if (newBlockRaw == nullptr) {
 			return nullptr;
 		}
@@ -752,6 +776,7 @@ private:
 	weak_atomic<bool> enqueuing;
 	mutable weak_atomic<bool> dequeuing;
 #endif
+	Allocator allocator;
 };
 
 // Like ReaderWriterQueue, but also providees blocking operations
@@ -759,7 +784,7 @@ template<typename T, size_t MAX_BLOCK_SIZE = 512>
 class BlockingReaderWriterQueue
 {
 private:
-	typedef ::moodycamel::ReaderWriterQueue<T, MAX_BLOCK_SIZE> ReaderWriterQueue;
+	typedef ::moodycamel::ReaderWriterQueue<T, std::allocator<char>, MAX_BLOCK_SIZE> ReaderWriterQueue;
 	
 public:
 	explicit BlockingReaderWriterQueue(size_t size = 15) AE_NO_TSAN
