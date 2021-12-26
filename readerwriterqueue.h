@@ -748,13 +748,18 @@ private:
 		a.deallocate(block, 0);
 	}
 
+	static inline size_t align_size(size_t pos, size_t alignment)
+	{
+		auto offset = (-pos & (alignment - 1));
+		return offset + pos;
+	}
+
 	static Block* make_block(Allocator& allocator, size_t capacity) AE_NO_TSAN
 	{
-		typename Allocator::template rebind<char>::other a(allocator);
+		typename Allocator::template rebind<size_t>::other a(allocator);
 		// Allocate enough memory for the block itself, as well as all the elements it will contain
-		auto size = sizeof(Block) + std::alignment_of<Block>::value - 1;
-		size += sizeof(T) * capacity + std::alignment_of<T>::value - 1;
-		auto newBlockRaw = a.allocate(size);
+		auto allocSize = align_size(sizeof(Block) + std::alignment_of<Block>::value - 1 + sizeof(T) * capacity + std::alignment_of<T>::value - 1, sizeof(size_t));
+		auto newBlockRaw = reinterpret_cast<char*>(a.allocate(allocSize/sizeof(size_t)));
 		if (newBlockRaw == nullptr) {
 			return nullptr;
 		}
